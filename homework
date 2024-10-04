@@ -138,7 +138,7 @@ EXPLAIN ANALYZE
 
 
 
-CREATE INDEX idx_gin_tickets_passenger_name ON bookings.tickets USING GIN (passenger_name gin_trgm_ops);
+CREATE INDEX CONCURRENTLY idx_gin_tickets_passenger_name ON bookings.tickets USING GIN (passenger_name gin_trgm_ops);
 -- DROP INDEX idx_gin_tickets_passenger_name
 
 
