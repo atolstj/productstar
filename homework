@@ -1,0 +1,164 @@
+--
+-- Создание бронирования
+--
+DO $$
+
+DECLARE v_flight_no character(6) = 'PG0312';
+		v_fare_conditions character varying(10) = 'Economy';
+		v_aircraft_code character(3);
+		v_flight_id integer;
+		v_tickets_qty integer;
+		v_max_seats_qty integer;
+
+BEGIN
+
+-- Хотим сделать бронь на последний по времени отправления рейс
+SELECT flight_id, aircraft_code INTO v_flight_id, v_aircraft_code
+FROM bookings.flights 
+WHERE flight_no = v_flight_no 
+ORDER BY scheduled_departure DESC 
+LIMIT 1 
+FOR UPDATE;
+
+-- получаем число броней на рейс с учетом текущей
+SELECT count(1) + 1 INTO v_tickets_qty 
+FROM bookings.ticket_flights 
+WHERE flight_id = v_flight_id
+	AND fare_conditions = v_fare_conditions;
+
+-- максимальное число мест для класса в самолете
+SELECT count(1) INTO v_max_seats_qty
+FROM bookings.seats
+WHERE aircraft_code = v_aircraft_code
+	AND fare_conditions = v_fare_conditions;
+
+-- главное не продать больше билетов, чем мест определенного класса
+IF v_tickets_qty >= v_max_seats_qty THEN
+	-- PERFORM pg_sleep(10);
+	ROLLBACK;
+    RAISE EXCEPTION 'Overbooking detected % %', v_flight_id, v_max_seats_qty;
+ELSE
+	INSERT INTO bookings.bookings(book_ref, book_date, total_amount)
+	VALUES('FFFFFA', '2024-10-04 10:00:00+00', 11111);
+
+	INSERT INTO bookings.tickets(ticket_no, book_ref, passenger_id, passenger_name, contact_data)
+	VALUES('0005435999874', 'FFFFFA', '1111 22222', 'TEST TESTOV', '{}');
+
+	INSERT INTO bookings.ticket_flights(ticket_no, flight_id, fare_conditions, amount)
+	VALUES('0005435999874', v_flight_id, v_fare_conditions, 11111);
+
+	-- PERFORM pg_sleep(10);
+	COMMIT;
+	RAISE NOTICE 'Booking is successfull % % %', v_flight_id, v_max_seats_qty, v_tickets_qty;
+END IF;
+
+END $$
+
+-- DELETE FROM bookings.ticket_flights WHERE ticket_no = '0005435999874'
+-- DELETE FROM bookings.tickets WHERE ticket_no = '0005435999874'
+-- DELETE FROM bookings.bookings WHERE book_ref = 'FFFFFA'
+
+
+
+
+--
+-- Создание посадочного талона
+--
+DO $$
+
+DECLARE v_flight_no character(6) = 'PG0312';
+		v_ticket_no character(13) = '0005435999874';
+		v_seat_no character varying(4) = '2D';
+		v_flight_id integer;
+		v_boarding_no integer;
+
+BEGIN
+
+-- проверка существования связи билет - рейс и блокировка рейса
+SELECT f.flight_id INTO v_flight_id
+FROM bookings.flights f
+INNER JOIN bookings.ticket_flights tf ON tf.flight_id = f.flight_id
+WHERE f.flight_no = v_flight_no
+	AND tf.ticket_no = v_ticket_no
+FOR UPDATE OF f;
+
+IF v_flight_id is null THEN
+	ROLLBACK;
+    RAISE EXCEPTION 'There is no ticket % for flight %', v_ticket_no, v_flight_no;
+ELSE
+	-- 
+	SELECT max(boarding_no) + 1 INTO v_boarding_no
+	FROM bookings.boarding_passes
+	WHERE flight_id = v_flight_id;
+
+	-- на случай если 1-ый посадочный талон
+	v_boarding_no := COALESCE(v_boarding_no, 1);
+
+	-- выбранное место занято, то нарушение уникального ограничения при вставке
+	-- пользователь должен заново выбрать место
+	INSERT INTO bookings.boarding_passes(ticket_no, flight_id, boarding_no, seat_no)
+	VALUES(v_ticket_no, v_flight_id, v_boarding_no, v_seat_no);
+	
+	COMMIT;
+	RAISE NOTICE '%', v_boarding_no;
+END IF;
+
+END $$
+
+
+
+
+--
+-- Оптимизация
+--
+SELECT * FROM pg_extension WHERE extname = 'pg_trgm';
+CREATE EXTENSION pg_trgm;
+
+EXPLAIN ANALYZE 
+	SELECT
+		* 
+	FROM bookings.tickets
+	WHERE passenger_name LIKE '%KLIM S%'
+	ORDER BY passenger_name
+	LIMIT 50;
+"Limit  (cost=65807.58..65813.42 rows=50 width=104) (actual time=143.432..147.359 rows=22 loops=1)"
+"  ->  Gather Merge  (cost=65807.58..65833.72 rows=224 width=104) (actual time=143.428..147.295 rows=22 loops=1)"
+"        Workers Planned: 2"
+"        Workers Launched: 2"
+"        ->  Sort  (cost=64807.56..64807.84 rows=112 width=104) (actual time=140.488..140.503 rows=7 loops=3)"
+"              Sort Key: passenger_name"
+"              Sort Method: quicksort  Memory: 26kB"
+"              Worker 0:  Sort Method: quicksort  Memory: 26kB"
+"              Worker 1:  Sort Method: quicksort  Memory: 27kB"
+"              ->  Parallel Seq Scan on tickets  (cost=0.00..64803.84 rows=112 width=104) (actual time=14.226..140.401 rows=7 loops=3)"
+"                    Filter: (passenger_name ~~ '%KLIM S%'::text)"
+"                    Rows Removed by Filter: 983278"
+"Planning Time: 0.130 ms"
+"Execution Time: 147.427 ms"
+
+
+
+CREATE INDEX idx_gin_tickets_passenger_name ON bookings.tickets USING GIN (passenger_name gin_trgm_ops);
+-- DROP INDEX idx_gin_tickets_passenger_name
+
+
+EXPLAIN ANALYZE 
+	SELECT
+		* 
+	FROM bookings.tickets
+	WHERE passenger_name LIKE '%KLIM S%'
+	ORDER BY passenger_name
+	LIMIT 50;
+"Limit  (cost=1221.26..1221.38 rows=50 width=104) (actual time=1.500..1.589 rows=22 loops=1)"
+"  ->  Sort  (cost=1221.26..1221.93 rows=270 width=104) (actual time=1.496..1.529 rows=22 loops=1)"
+"        Sort Key: passenger_name"
+"        Sort Method: quicksort  Memory: 29kB"
+"        ->  Bitmap Heap Scan on tickets  (cost=188.77..1212.29 rows=270 width=104) (actual time=1.400..1.454 rows=22 loops=1)"
+"              Recheck Cond: (passenger_name ~~ '%KLIM S%'::text)"
+"              Heap Blocks: exact=22"
+"              ->  Bitmap Index Scan on idx_gin_tickets_passenger_name  (cost=0.00..188.71 rows=270 width=0) (actual time=1.390..1.392 rows=22 loops=1)"
+"                    Index Cond: (passenger_name ~~ '%KLIM S%'::text)"
+"Planning Time: 0.172 ms"
+"Execution Time: 1.639 ms"
+
+	
